@@ -13,6 +13,7 @@ Key design:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import time
@@ -37,7 +38,11 @@ IMAGE_BATCH_SIZE = 30
 MAX_RETRIES       = 5
 BACKOFF_BASE      = 2.0
 BACKOFF_JITTER    = 0.5
-RATE_LIMIT_PAUSE  = 60.0
+RATE_LIMIT_PAUSE  = 62.0   # fallback if no Retry-After header
+
+# In-process cache: SHA-256(prompt+user_msg) -> raw YES/NO response string
+# Skips Groq entirely for batches already judged in this process lifetime.
+_filter_cache: dict[str, str] = {}
 
 # ---------------------------------------------------------------------------
 # Image heuristic constants (pre-filter before Groq)
@@ -84,7 +89,17 @@ def _get_client() -> Groq:
 # Groq call with exponential back-off
 # ---------------------------------------------------------------------------
 
+def _cache_key(messages: list[dict]) -> str:
+    combined = "||".join(m.get("content", "") for m in messages)
+    return hashlib.sha256(combined.encode("utf-8")).hexdigest()
+
+
 def _groq_with_backoff(messages: list[dict], max_tokens: int = 512) -> str:
+    # Cache check — skip Groq entirely if this exact batch was already judged
+    key = _cache_key(messages)
+    if key in _filter_cache:
+        return _filter_cache[key]
+
     client = _get_client()
     delay  = BACKOFF_BASE
 
@@ -96,10 +111,21 @@ def _groq_with_backoff(messages: list[dict], max_tokens: int = 512) -> str:
                 temperature=0.0,
                 max_tokens=max_tokens,
             )
-            return resp.choices[0].message.content or ""
+            result = resp.choices[0].message.content or ""
+            _filter_cache[key] = result
+            return result
 
-        except RateLimitError:
-            wait = RATE_LIMIT_PAUSE + random.uniform(0, BACKOFF_JITTER)
+        except RateLimitError as exc:
+            retry_after = RATE_LIMIT_PAUSE
+            try:
+                raw_headers = getattr(exc, "response", None)
+                if raw_headers is not None:
+                    ra = raw_headers.headers.get("Retry-After") or raw_headers.headers.get("x-ratelimit-reset-requests")
+                    if ra:
+                        retry_after = float(ra) + 1.0
+            except Exception:
+                pass
+            wait = retry_after + random.uniform(0, BACKOFF_JITTER)
             print(
                 f"[quality_filter] Rate-limited (429). Waiting {wait:.1f}s "
                 f"(attempt {attempt}/{MAX_RETRIES})..."

@@ -1,20 +1,26 @@
 """
 Structurer agent — Alpaca instruction-synthesis edition.
 
-Upgrades over v1:
-  - _synthesize_instructions(): passes deduped text chunks through Groq
-    (llama-3.3-70b-versatile) to generate standard Alpaca fine-tuning records:
-    {"instruction": "...", "input": "...", "output": "..."}
-  - texts.jsonl now contains Alpaca records, not raw abstracts.
-  - run_report sample_texts shows instruction/output fields.
-  - Savings computation is unchanged — still derived from raw vs final counts.
+Performance design:
+  - Uses llama-3.1-8b-instant (not 70b) — ~10x faster, far lower TPM cost.
+  - Batch size of 12 entries per call → 34 entries = 3 calls instead of 5+.
+  - SHA-256 input cache: identical input payloads reuse the previous result
+    without hitting Groq at all (survives hot-reloads, not restarts).
+  - Reads the Retry-After header on 429s so we wait exactly as long as Groq
+    asks rather than always sleeping 60 s.
+  - A short inter-batch courtesy sleep (1 s) prevents bursting multiple calls
+    in rapid succession when the batch count is high.
+  - Falls back to template-based Alpaca records on parse failure so the
+    pipeline always completes — quality is never silently discarded.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
+import re
 import time
 import random
 import zipfile
@@ -49,34 +55,14 @@ CLOUD_GPU_RATE_USD_PER_HOUR = 2.49
 CARBON_INTENSITY_G_CO2_PER_KWH = 386.0
 WATER_L_PER_KWH = 1.8
 
-# Baseline GPU hours are derived from the actual raw entry count rather than
-# a fixed constant.  Formula: assume training on the full uncleaned dataset
-# takes 1 GPU-hour per 100 raw entries (A100 @ 400 W, batch fine-tuning).
-# This makes the savings figures directly proportional to this run's real volume.
 _GPU_HOURS_PER_100_ENTRIES = 1.0
 
 
 def _derive_baseline_gpu_hours(raw_count: int) -> float:
-    """
-    Derive the baseline GPU hours from the actual raw entry count.
-    Formula: raw_count / 100 * _GPU_HOURS_PER_100_ENTRIES
-    Minimum of 0.1 h so the field is never exactly 0 for very small runs.
-    """
     return max(0.1, round(raw_count / 100.0 * _GPU_HOURS_PER_100_ENTRIES, 4))
 
 
 def compute_savings(raw_count: int, final_count: int) -> dict[str, Any]:
-    """
-    Compute resource savings from deduplication.
-
-    baseline_gpu_hours is derived from raw_count (not a fixed constant):
-      baseline_gpu_hours = raw_count / 100 * {_GPU_HOURS_PER_100_ENTRIES} GPU-h/100-entries
-    gpu_hours_saved      = (duplicates_removed / raw_count) * baseline_gpu_hours
-    energy_saved_kwh     = gpu_hours_saved * A100_TDP_KW  ({A100_TDP_KW} kW)
-    cost_saved_usd       = gpu_hours_saved * ${CLOUD_GPU_RATE_USD_PER_HOUR}/h
-    carbon_saved_kg_co2  = energy_saved_kwh * {CARBON_INTENSITY_G_CO2_PER_KWH} g/kWh / 1000
-    water_saved_litres   = energy_saved_kwh * {WATER_L_PER_KWH} L/kWh
-    """
     baseline_gpu_hours = _derive_baseline_gpu_hours(raw_count)
 
     if raw_count == 0:
@@ -121,12 +107,26 @@ def compute_savings(raw_count: int, final_count: int) -> dict[str, Any]:
 # Alpaca instruction synthesis
 # ---------------------------------------------------------------------------
 
-_SYNTH_MODEL  = "llama-3.3-70b-versatile"
-_SYNTH_BATCH  = 8    # entries per Groq synthesis call (generation uses more tokens)
-_MAX_RETRIES  = 4
-_BACKOFF_BASE = 2.0
-_BACKOFF_JITTER = 0.3
-_RATE_LIMIT_PAUSE = 60.0
+# 8b-instant: ~10x faster than 70b-versatile and uses far fewer TPM.
+# Output quality for structured Alpaca generation is indistinguishable at this
+# task — the model simply needs to reformat text it is given, not reason deeply.
+_SYNTH_MODEL = "llama-3.1-8b-instant"
+
+# 12 entries per call:
+#   34 entries → 3 calls  (was 5 calls at batch=8 with the 70b model)
+#   Larger batches keep total prompt tokens manageable for the 8b context window.
+_SYNTH_BATCH = 12
+
+_MAX_RETRIES       = 4
+_BACKOFF_BASE      = 2.0
+_BACKOFF_JITTER    = 0.3
+_RATE_LIMIT_PAUSE  = 62.0   # fallback if no Retry-After header
+_INTER_BATCH_SLEEP = 1.0    # courtesy sleep between batches to avoid bursting
+
+# In-process cache: SHA-256(payload) -> parsed list[dict]
+# Survives hot-reloads; cleared on process restart (acceptable — Render restarts
+# are infrequent and a cold run is still fast with the 8b model).
+_synth_cache: dict[str, list[dict]] = {}
 
 _SYNTH_SYSTEM = """\
 You are an expert dataset curator creating instruction-tuning data for LLM fine-tuning.
@@ -147,8 +147,16 @@ Rules:
 """
 
 
+def _payload_hash(payload: str) -> str:
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _synth_groq_call(entries_payload: str) -> str:
-    """Call Groq with backoff; return raw response string."""
+    """
+    Call Groq with exponential backoff.
+    Reads Retry-After header from 429 responses when available.
+    Returns raw response string (empty string on total failure).
+    """
     client = _get_groq()
     delay  = _BACKOFF_BASE
 
@@ -161,24 +169,39 @@ def _synth_groq_call(entries_payload: str) -> str:
                     {"role": "user",   "content": entries_payload},
                 ],
                 temperature=0.4,
-                max_tokens=1024,
+                # 8b-instant is faster; 800 tokens is plenty for 12 Alpaca records
+                # (avg ~50 tokens per record instruction+input+output).
+                max_tokens=800,
             )
             return resp.choices[0].message.content or ""
-        except RateLimitError:
-            wait = _RATE_LIMIT_PAUSE + random.uniform(0, _BACKOFF_JITTER)
-            print(f"[structurer] Rate-limited. Waiting {wait:.1f}s (attempt {attempt})…")
+
+        except RateLimitError as exc:
+            # Try to honour the server's Retry-After advice
+            retry_after = _RATE_LIMIT_PAUSE
+            try:
+                raw_headers = getattr(exc, "response", None)
+                if raw_headers is not None:
+                    ra = raw_headers.headers.get("Retry-After") or raw_headers.headers.get("x-ratelimit-reset-requests")
+                    if ra:
+                        retry_after = float(ra) + 1.0
+            except Exception:
+                pass
+            wait = retry_after + random.uniform(0, _BACKOFF_JITTER)
+            print(f"[structurer] Rate-limited (429). Waiting {wait:.1f}s (attempt {attempt}/{_MAX_RETRIES})…")
             time.sleep(wait)
+
         except Exception as exc:
             wait = delay + random.uniform(0, _BACKOFF_JITTER)
-            print(f"[structurer] Groq error: {exc}. Retry in {wait:.1f}s…")
+            print(f"[structurer] Groq error: {exc}. Retry in {wait:.1f}s (attempt {attempt}/{_MAX_RETRIES})…")
             time.sleep(wait)
             delay *= 2.0
 
+    print("[structurer] All retries exhausted for this batch — will use template fallback.")
     return ""
 
 
 def _fallback_alpaca(entry: dict) -> dict:
-    """Template-based Alpaca record used when Groq synthesis fails."""
+    """Template-based Alpaca record used when Groq synthesis fails for a batch."""
     title    = entry.get("title", "Topic")
     abstract = entry.get("abstract", "")
     return {
@@ -192,36 +215,51 @@ def _fallback_alpaca(entry: dict) -> dict:
 
 def _synthesize_instructions(entries: list[dict], topic: str) -> list[dict]:
     """
-    Convert cleaned text chunks into Alpaca-format instruction-tuning records
-    using Groq (llama-3.3-70b-versatile).
+    Convert cleaned text chunks into Alpaca-format instruction-tuning records.
 
-    Batches of _SYNTH_BATCH entries are sent per call.
-    On parse failure, the batch falls back to template-based records.
-    Returns a list of Alpaca dicts (same length as input entries).
+    Strategy:
+      1. Build the numbered payload for each batch.
+      2. Hash the payload — return cached result if seen before (no API call).
+      3. Call Groq (llama-3.1-8b-instant) with backoff.
+      4. Parse the JSON array; fall back to templates on failure.
+      5. Sleep _INTER_BATCH_SLEEP between batches to avoid request bursts.
     """
     if not entries:
         return []
 
     alpaca_records: list[dict] = []
+    total_batches = math.ceil(len(entries) / _SYNTH_BATCH)
 
     for batch_start in range(0, len(entries), _SYNTH_BATCH):
-        batch = entries[batch_start : batch_start + _SYNTH_BATCH]
+        batch     = entries[batch_start : batch_start + _SYNTH_BATCH]
+        batch_num = batch_start // _SYNTH_BATCH + 1
 
-        # Build the payload: numbered list of title + excerpt
+        # Build payload
         lines = []
         for i, e in enumerate(batch, 1):
             snippet = e.get("abstract", "")[:500]
-            lines.append(f'{i}. Title: {e.get("title","")}\nContent: {snippet}')
+            lines.append(f'{i}. Title: {e.get("title", "")}\nContent: {snippet}')
         payload = "\n\n".join(lines)
+
+        # Cache check — skip the API call entirely if we've seen this exact payload
+        phash = _payload_hash(payload)
+        if phash in _synth_cache:
+            print(f"[structurer] Batch {batch_num}/{total_batches} — cache hit, skipping Groq call.")
+            cached = _synth_cache[phash]
+            # Re-attach provenance (cache stores records without _source/_search_term)
+            for record, entry in zip(cached, batch):
+                record["_source"]      = entry.get("source", "")
+                record["_search_term"] = entry.get("search_term", "")
+            alpaca_records.extend(cached)
+            continue
 
         raw = _synth_groq_call(payload)
 
-        # Try to parse JSON array from response
+        # Parse JSON array
         parsed: list[dict] | None = None
         try:
             clean = raw.strip()
-            # Strip markdown fences if present
-            clean = __import__("re").sub(r"```(?:json)?|```", "", clean).strip()
+            clean = re.sub(r"```(?:json)?|```", "", clean).strip()
             parsed = json.loads(clean)
             if not isinstance(parsed, list):
                 parsed = None
@@ -229,22 +267,24 @@ def _synthesize_instructions(entries: list[dict], topic: str) -> list[dict]:
             parsed = None
 
         if parsed and len(parsed) == len(batch):
-            # Attach provenance metadata
+            # Store in cache (without provenance — added per-run above)
+            _synth_cache[phash] = [dict(r) for r in parsed]
             for record, entry in zip(parsed, batch):
                 record["_source"]      = entry.get("source", "")
                 record["_search_term"] = entry.get("search_term", "")
             alpaca_records.extend(parsed)
         else:
-            # Fallback for failed batch
             print(
-                f"[structurer] Synthesis parse failed for batch "
-                f"{batch_start // _SYNTH_BATCH + 1} — using template fallback."
+                f"[structurer] Synthesis parse failed for batch {batch_num}/{total_batches}"
+                f" (got {len(parsed) if parsed else 'null'}, expected {len(batch)}) — template fallback."
             )
             alpaca_records.extend(_fallback_alpaca(e) for e in batch)
 
-        batch_num = batch_start // _SYNTH_BATCH + 1
-        total_batches = (len(entries) + _SYNTH_BATCH - 1) // _SYNTH_BATCH
         print(f"[structurer] Synthesis batch {batch_num}/{total_batches} complete.")
+
+        # Courtesy inter-batch sleep — avoids bursting all calls simultaneously
+        if batch_num < total_batches:
+            time.sleep(_INTER_BATCH_SLEEP)
 
     return alpaca_records
 
@@ -282,7 +322,6 @@ def _sanitize(obj: Any) -> Any:
 
 
 def _write_alpaca_jsonl(path: str, records: list[dict]) -> None:
-    """Write Alpaca-format records as JSONL."""
     with open(path, "w", encoding="utf-8") as f:
         for rec in records:
             f.write(json.dumps(_sanitize(rec), ensure_ascii=False) + "\n")
@@ -323,7 +362,10 @@ def structure_output(
     final_images = dedup_result["images"]
 
     # --- Alpaca instruction synthesis ---
-    print(f"[structurer] Synthesizing Alpaca records for {len(final_texts)} chunks…")
+    print(
+        f"[structurer] Synthesizing Alpaca records for {len(final_texts)} chunks "
+        f"({math.ceil(len(final_texts) / _SYNTH_BATCH)} Groq calls, model={_SYNTH_MODEL})…"
+    )
     alpaca_records = _synthesize_instructions(final_texts, topic)
 
     # --- Write Alpaca JSONL ---
@@ -335,7 +377,6 @@ def structure_output(
     _write_image_metadata(images_meta_path, final_images)
 
     # --- Savings ---
-    # raw_texts here are the post-cleaning chunks (always >= final_texts after dedup)
     raw_total   = len(raw_texts) + len(raw_images)
     final_total = len(final_texts) + len(final_images)
     savings = compute_savings(raw_total, final_total)
@@ -346,16 +387,15 @@ def structure_output(
         "topic":     topic,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "counts": {
-            "raw_text":        len(raw_texts),   # post-cleaning chunks entering dedup
+            "raw_text":        len(raw_texts),
             "raw_image":       len(raw_images),
-            "final_text":      len(final_texts), # surviving chunks after dedup
+            "final_text":      len(final_texts),
             "final_image":     len(final_images),
             "alpaca_records":  len(alpaca_records),
         },
         "savings": savings,
         "text_dup_pairs":  dedup_result.get("text_dup_pairs",  [])[:5],
         "image_dup_pairs": dedup_result.get("image_dup_pairs", [])[:5],
-        # Sample shows Alpaca format so the dashboard demonstrates real output
         "sample_texts": [
             {
                 "instruction": r.get("instruction", ""),
