@@ -6,9 +6,7 @@ export const metadata: Metadata = {
   description:
     "Automated end-to-end data mining and curation for AI training datasets.",
   icons: {
-    icon: [
-      { url: "/icon.svg", type: "image/svg+xml" },
-    ],
+    icon: "/favicon.ico",
   },
 };
 
@@ -19,9 +17,6 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <head>
-        <link rel="icon" href="/icon.svg" type="image/svg+xml" />
-      </head>
       <body className="bg-gray-50 text-gray-900 antialiased">{children}</body>
     </html>
   );
