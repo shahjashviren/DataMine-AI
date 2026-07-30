@@ -5,6 +5,9 @@ export const metadata: Metadata = {
   title: "DataMine AI — Training Data Pipeline",
   description:
     "Automated end-to-end data mining and curation for AI training datasets.",
+  icons: {
+    icon: "/icon.svg",
+  },
 };
 
 export default function RootLayout({

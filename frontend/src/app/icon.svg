@@ -1,52 +1,38 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
   <defs>
-    <!-- Main blue-purple-pink gradient matching the "DataMine AI" title -->
-    <linearGradient id="g1" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
-      <stop offset="0%"   stop-color="#60a5fa"/>
-      <stop offset="50%"  stop-color="#c084fc"/>
+    <linearGradient id="grad" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#60a5fa"/>
+      <stop offset="48%" stop-color="#a78bfa"/>
       <stop offset="100%" stop-color="#ec4899"/>
     </linearGradient>
-    <!-- Softer glow fill for nodes -->
-    <linearGradient id="g2" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
-      <stop offset="0%"   stop-color="#93c5fd"/>
-      <stop offset="50%"  stop-color="#d8b4fe"/>
-      <stop offset="100%" stop-color="#f9a8d4"/>
+    <linearGradient id="glow" x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#bfdbfe"/>
+      <stop offset="50%" stop-color="#ede9fe"/>
+      <stop offset="100%" stop-color="#fce7f3"/>
     </linearGradient>
-    <!-- Dark background radial -->
-    <radialGradient id="bg" cx="50%" cy="40%" r="60%">
-      <stop offset="0%"   stop-color="#1e1b4b"/>
-      <stop offset="100%" stop-color="#0f0a1e"/>
+    <radialGradient id="bg" cx="40%" cy="35%" r="70%">
+      <stop offset="0%" stop-color="#1e1b4b"/>
+      <stop offset="100%" stop-color="#09090f"/>
+    </radialGradient>
+    <radialGradient id="shine" cx="35%" cy="30%" r="55%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
     </radialGradient>
   </defs>
 
-  <!-- Background pill -->
-  <rect width="32" height="32" rx="8" fill="url(#bg)"/>
+  <rect width="32" height="32" rx="7" fill="url(#bg)"/>
+  <rect width="32" height="32" rx="7" fill="url(#shine)"/>
 
-  <!-- ── Pipeline flow: three nodes connected by two tapered conduits ── -->
+  <path d="M5 11 C5 9.343 6.343 8 8 8 L24 8 C25.657 8 27 9.343 27 11 L27 13.5 C27 14.328 26.328 15 25.5 15 L6.5 15 C5.672 15 5 14.328 5 13.5 Z" fill="url(#grad)" opacity="0.95"/>
 
-  <!-- Conduit A: node-left → node-mid (slightly tapered) -->
-  <path d="M 8 15.2 L 13.5 14 L 13.5 18 L 8 16.8 Z" fill="url(#g1)" opacity="0.75"/>
+  <path d="M8 17 L24 17 C25.657 17 27 18.343 27 20 L27 21.5 C27 22.328 26.328 23 25.5 23 L6.5 23 C5.672 23 5 22.328 5 21.5 L5 20 C5 18.343 6.343 17 8 17 Z" fill="url(#grad)" opacity="0.70"/>
 
-  <!-- Conduit B: node-mid → node-right -->
-  <path d="M 18.5 14 L 24 12.8 L 24 19.2 L 18.5 18 Z" fill="url(#g1)" opacity="0.75"/>
+  <rect x="5" y="25" width="14" height="4" rx="2" fill="url(#grad)" opacity="0.45"/>
 
-  <!-- Node left — source -->
-  <circle cx="7"  cy="16" r="3.8" fill="url(#g2)" opacity="0.95"/>
-  <circle cx="7"  cy="16" r="3.8" fill="none" stroke="url(#g1)" stroke-width="0.8"/>
+  <circle cx="23.5" cy="11.25" r="1.4" fill="#ffffff" opacity="0.9"/>
+  <circle cx="20.5" cy="11.25" r="1.4" fill="#ffffff" opacity="0.55"/>
+  <circle cx="17.5" cy="11.25" r="1.4" fill="#ffffff" opacity="0.25"/>
 
-  <!-- Node mid — transform -->
-  <circle cx="16" cy="16" r="4.4" fill="url(#g2)" opacity="0.95"/>
-  <circle cx="16" cy="16" r="4.4" fill="none" stroke="url(#g1)" stroke-width="0.9"/>
-
-  <!-- Node right — output (slightly larger, brighter) -->
-  <circle cx="25" cy="16" r="3.8" fill="url(#g2)" opacity="0.95"/>
-  <circle cx="25" cy="16" r="3.8" fill="none" stroke="url(#g1)" stroke-width="0.8"/>
-
-  <!-- Inner spark dots (data pulses) on each node -->
-  <circle cx="7"  cy="16" r="1.3" fill="#ffffff" opacity="0.85"/>
-  <circle cx="16" cy="16" r="1.6" fill="#ffffff" opacity="0.9"/>
-  <circle cx="25" cy="16" r="1.3" fill="#ffffff" opacity="0.85"/>
-
-  <!-- Tiny directional arrow tip on conduit B exit -->
-  <path d="M 23 14.5 L 26.5 16 L 23 17.5" fill="none" stroke="url(#g1)" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" opacity="0.0"/>
+  <circle cx="23.5" cy="20" r="1.4" fill="#ffffff" opacity="0.7"/>
+  <circle cx="20.5" cy="20" r="1.4" fill="#ffffff" opacity="0.35"/>
 </svg>
