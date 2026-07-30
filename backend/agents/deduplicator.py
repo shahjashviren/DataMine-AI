@@ -1,7 +1,8 @@
 """
 Deduplicator agent.
 
-Text:  embed abstracts with sentence-transformers (all-MiniLM-L6-v2),
+Text:  embed abstracts via the Hugging Face Inference API
+       (sentence-transformers/all-MiniLM-L6-v2, hosted — no local PyTorch),
        compute pairwise cosine similarity, drop entries that are near-duplicates
        of an already-kept entry (similarity > threshold).
 
@@ -13,34 +14,70 @@ from __future__ import annotations
 
 import io
 import os
-import warnings
+import time
 from typing import Any
 
 import numpy as np
 import requests
 from PIL import Image
 
-# Suppress noisy tokenizer warnings from sentence-transformers
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-warnings.filterwarnings("ignore", category=FutureWarning)
+# ---------------------------------------------------------------------------
+# Text dedup — HF Inference API cosine similarity
+# ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Text dedup — sentence-transformers cosine similarity
-# ---------------------------------------------------------------------------
+# HF Inference API endpoint for the hosted all-MiniLM-L6-v2 model.
+# No local PyTorch / sentence-transformers required.
+_HF_EMBED_URL = (
+    "https://api-inference.huggingface.co/models/"
+    "sentence-transformers/all-MiniLM-L6-v2"
+)
 
 # 0.78 catches genuine near-duplicates from overlapping multi-query search streams
 # (web + academic results on the same topic typically land in the 0.75–0.84 range)
 # while preserving distinct entries that cover different angles.
 TEXT_SIM_THRESHOLD = 0.78   # cosine similarity above this → near-duplicate
-_st_model = None
 
 
-def _get_st_model():
-    global _st_model
-    if _st_model is None:
-        from sentence_transformers import SentenceTransformer
-        _st_model = SentenceTransformer("all-MiniLM-L6-v2")
-    return _st_model
+def _hf_embed(texts: list[str]) -> np.ndarray:
+    """
+    Embed a list of texts using the HF Inference API.
+
+    The feature-extraction endpoint returns a list of vectors.
+    Supports an optional HF_API_TOKEN env var for higher rate limits,
+    but works anonymously on the free tier for small batches.
+
+    Retries once on 503 (model loading) with a 20 s back-off.
+    Falls back to zero vectors if the API is unavailable, which means
+    dedup is skipped (all entries kept) — a safe degradation.
+    """
+    token = os.environ.get("HF_API_TOKEN", "")
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    payload = {"inputs": texts, "options": {"wait_for_model": True}}
+
+    for attempt in range(2):
+        try:
+            resp = requests.post(_HF_EMBED_URL, headers=headers, json=payload, timeout=60)
+            if resp.status_code == 503 and attempt == 0:
+                # Model is warming up — wait and retry once
+                print("[deduplicator] HF model loading (503), waiting 20 s…")
+                time.sleep(20)
+                continue
+            resp.raise_for_status()
+            vectors = resp.json()
+            # API returns list[list[float]] for feature-extraction
+            return np.array(vectors, dtype=np.float32)
+        except Exception as exc:
+            print(f"[deduplicator] HF Inference API error (attempt {attempt + 1}): {exc}")
+            if attempt == 0:
+                time.sleep(5)
+            else:
+                # Return zero matrix — dedup will produce no drops (safe fallback)
+                return np.zeros((len(texts), 384), dtype=np.float32)
+
+    return np.zeros((len(texts), 384), dtype=np.float32)
 
 
 def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -67,9 +104,8 @@ def _dedup_texts(entries: list[dict]) -> dict[str, Any]:
     if not entries:
         return {"kept": [], "dup_pairs": []}
 
-    model = _get_st_model()
     abstracts = [e["abstract"] for e in entries]
-    embeddings = model.encode(abstracts, show_progress_bar=False, batch_size=32)
+    embeddings = _hf_embed(abstracts)
 
     kept_indices: list[int] = []
     dropped: set[int] = set()
