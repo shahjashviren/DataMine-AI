@@ -1,0 +1,175 @@
+
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Pipeline Changes — Verification Report</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; font-size: 14px; line-height: 1.6; background: #fff; color: #1f2328; }
+.page { max-width: 760px; margin: 0 auto; padding: 28px 16px 48px; }
+h1 { font-size: 19px; font-weight: 700; margin-bottom: 4px; }
+.sub { color: #57606a; font-size: 13px; margin-bottom: 24px; }
+h2 { font-size: 14px; font-weight: 700; margin: 22px 0 10px; padding-bottom: 5px; border-bottom: 1px solid #e5e7eb; }
+h3 { font-size: 13px; font-weight: 600; margin: 12px 0 4px; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.pass { background: #d1fae5; color: #065f46; }
+.done { background: #dbeafe; color: #1e40af; }
+.warn { background: #fef3c7; color: #92400e; }
+.card { border: 1px solid #e5e7eb; border-radius: 6px; margin-bottom: 14px; overflow: hidden; }
+.card-head { background: #f7f8fa; padding: 9px 13px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #e5e7eb; }
+.cn { font-weight: 700; color: #3b82d4; font-size: 12px; min-width: 76px; }
+.ct { font-weight: 600; font-size: 13px; flex: 1; }
+.card-body { padding: 11px 13px; font-size: 13px; }
+.card-body p { margin-bottom: 7px; }
+.card-body p:last-child { margin-bottom: 0; }
+.lbl { font-weight: 600; color: #57606a; }
+pre { background: #f7f8fa; border: 1px solid #e5e7eb; border-radius: 4px; padding: 9px 11px; font-size: 11.5px; font-family: "Consolas","Menlo",monospace; white-space: pre-wrap; word-break: break-word; margin: 5px 0; }
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 8px; }
+th { background: #f7f8fa; text-align: left; padding: 6px 10px; border-bottom: 2px solid #e5e7eb; font-weight: 600; }
+td { padding: 5px 10px; border-bottom: 1px solid #f0f0f0; vertical-align: top; }
+tr:last-child td { border-bottom: none; }
+.vrow { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid #f3f3f3; font-size: 13px; }
+.vrow:last-child { border-bottom: none; }
+.vlbl { flex: 1; }
+.log { background: #1a1b2e; color: #cdd6f4; border-radius: 5px; padding: 10px 12px; font-size: 11px; font-family: "Consolas","Menlo",monospace; white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow-y: auto; margin-top: 6px; }
+.ok { color: #a6e3a1; } .key { color: #89dceb; } .hi { color: #f9e2af; } .dr { color: #f38ba8; }
+footer { border-top: 1px solid #e5e7eb; margin-top: 36px; padding-top: 10px; text-align: center; font-size: 12px; color: #57606a; }
+</style>
+</head>
+<body>
+<div class="page">
+
+<h1>DataMine AI — Pipeline Changes Report</h1>
+<p class="sub">4 changes implemented &amp; verified across 2 live runs  |  2026-07-30</p>
+
+<h2>Verification Checklist</h2>
+<div class="vrow"><span class="vlbl"><strong>Change 1</strong> — arXiv removed; Wikipedia REST + S2 two-query wired in</span><span class="badge pass">PASS</span></div>
+<div class="vrow"><span class="vlbl"><strong>Change 1</strong> — User-Agent header on every HTTP request</span><span class="badge pass">PASS (Wikipedia returned 200)</span></div>
+<div class="vrow"><span class="vlbl"><strong>Change 2</strong> — chunk count traceable; missing-parent raises RuntimeError</span><span class="badge pass">PASS (0 missing)</span></div>
+<div class="vrow"><span class="vlbl"><strong>Change 2</strong> — factor logged explicitly in pipeline.log</span><span class="badge pass">PASS</span></div>
+<div class="vrow"><span class="vlbl"><strong>Change 3</strong> — text specificity gate (YES/NO, not 1-10)</span><span class="badge pass">PASS</span></div>
+<div class="vrow"><span class="vlbl"><strong>Change 3</strong> — image title relevance via Groq (DROP on tangential)</span><span class="badge pass">PASS — e.g. "Memorial Truck 9/11" DROPped</span></div>
+<div class="vrow"><span class="vlbl"><strong>Change 4</strong> — baseline_derivation visible in run_report.json</span><span class="badge pass">PASS</span></div>
+<div class="vrow"><span class="vlbl"><strong>S2 rate-limit</strong> — S2 returned 429 on both runs (free-tier daily cap hit); Wikipedia filled the gap</span><span class="badge warn">WARN — S2 ok when quota resets</span></div>
+
+<h2>Change 1 — Replace arXiv → Wikipedia REST + Semantic Scholar ×2</h2>
+<div class="card">
+  <div class="card-head"><span class="cn">Change 1</span><span class="ct">arXiv removed; Wikipedia uses /api/rest_v1/page/summary/{title}</span><span class="badge done">Done</span></div>
+  <div class="card-body">
+    <p><span class="lbl">What changed in collector.py:</span> Removed <code>_fetch_arxiv()</code> and <code>ARXIV_API</code> entirely. <code>_fetch_wikipedia()</code> now calls the MediaWiki search endpoint to get page titles, then fetches each page via the REST Summary API (<code>/api/rest_v1/page/summary/{title}</code>) — clean plain-text, no HTML parsing.</p>
+    <p><span class="lbl">Two S2 queries per intent query:</span> For each of the 3 intent queries, S2 is called twice — once with the query verbatim (S2-A) and once with a complementary rephrasing built by <code>_make_s2_query_b()</code> (S2-B). This guarantees overlapping results for the deduplicator.</p>
+    <p><span class="lbl">User-Agent on every request:</span> A module-level <code>_HEADERS = {"User-Agent": "DataMineAI/2.0 ..."}</code> dict is passed to every <code>requests.get/post</code> call — Wikipedia, Wikimedia Commons, Semantic Scholar, Openverse.</p>
+    <pre>Run 1 — truck freight logistics:
+  Wikipedia=28  SemanticScholar=26  (S2 rate-limited on 2 of 6 calls)
+  [collector] Wikipedia 'Truck freight transport...': 10/10 pages fetched
+
+Run 2 — honeybee pollination ecology:
+  Wikipedia=21  SemanticScholar=0   (S2 quota exhausted for the day)
+  [collector] Wikipedia 'Honeybee colony social structure...': 10/10 pages fetched</pre>
+  </div>
+</div>
+
+<h2>Change 2 — Chunking Multiplication Fully Tracked</h2>
+<div class="card">
+  <div class="card-head"><span class="cn">Change 2</span><span class="ct">Explicit factor logging + RuntimeError if parent_document_id missing</span><span class="badge done">Done</span></div>
+  <div class="card-body">
+    <p><span class="lbl">What changed in cleaner.py:</span> <code>clean_data()</code> now checks every output entry for <code>parent_document_id</code> after cleaning. If any entry is missing it, it raises <code>RuntimeError</code> immediately — the bug can never pass silently.</p>
+    <p><span class="lbl">Logging:</span> The multiplication factor is explicitly printed on every run so it's visible in pipeline.log:</p>
+    <pre>Run 1: 54 raw entries -&gt; 171 chunks (factor 3.17x — each chunk carries parent_document_id,
+        dedup will skip intra-doc comparisons).
+Run 2: 22 raw entries -&gt; 24 chunks (factor 1.09x — ...)</pre>
+    <p><span class="lbl">Invariant verified:</span> Both runs: <strong>missing parent_document_id = 0</strong>. No intra-doc dup pairs flagged.</p>
+    <p><span class="lbl">Why chunks can exceed raw count:</span> Wikipedia article extracts are often longer than <code>_MAX_CHUNK_CHARS</code> (1 000 chars). Those are split by the existing chunker, with each chunk tagged to its source page via <code>parent_document_id = "wiki:{page_id}"</code>. The deduplicator skips any pair sharing the same parent.</p>
+  </div>
+</div>
+
+<h2>Change 3 — Stricter Relevance Filter (Text + Images)</h2>
+<div class="card">
+  <div class="card-head"><span class="cn">Change 3</span><span class="ct">YES/NO specificity gate replaces 1-10 scoring; image Groq title check added</span><span class="badge done">Done</span></div>
+  <div class="card-body">
+    <p><span class="lbl">Text prompt rewrite:</span> Replaced the 1-10 scoring rubric with a binary YES/NO prompt. The exact question asked is:</p>
+    <pre>YES — the text is SPECIFICALLY and DIRECTLY about "{topic}", not merely about a
+      broader category, an adjacent technology, or general infrastructure that
+      could apply to many unrelated fields.
+NO  — the text is off-topic, uses the same words in a different domain, or is
+      only tangentially related.</pre>
+    <p><span class="lbl">Image Groq filter (new):</span> After the heuristic pre-filter, all titled images are now passed to Groq for a YES/NO relevance check on their title + tags. Untitled images pass through. Evidence from Run 1:</p>
+    <pre><span class="dr">[img DROP] Memorial Truck 9/11 (Scroll Down)</span>
+<span class="dr">[img DROP] USACE, EUCOM break ground on first of 10 fire station renova...</span>
+<span class="dr">[img DROP] SoCal Freight Graffiti Benching (11-02-2020) ×6</span>
+<span class="ok">[img KEEP] Container trucks on an American highway</span>
+<span class="ok">[img KEEP] Introduction to Transportation Management Systems (TMS)...</span>
+<span class="ok">[img KEEP] Freight Management: Streamlining Your Supply Chain Operations</span></pre>
+    <p>Run 1 image filter: 61 in → 36 out (41% dropped). Run 2: 40 in → 25 out (38% dropped).</p>
+  </div>
+</div>
+
+<h2>Change 4 — baseline_derivation in Report (Verified)</h2>
+<div class="card">
+  <div class="card-head"><span class="cn">Change 4</span><span class="ct">baseline_gpu_hours derived from actual entry count, formula shown in report</span><span class="badge done">Done</span></div>
+  <div class="card-body">
+    <p>Already implemented in the previous session. Confirmed present in both run reports:</p>
+    <pre>Run 1 (232 raw entries):
+  "baseline_gpu_hours": 2.32,
+  "baseline_derivation": "max(0.1, 232/100 * 1.0 GPU-h/100-entries) = 2.32 h"
+
+Run 2 (64 raw entries):
+  "baseline_gpu_hours": 0.64,
+  "baseline_derivation": "max(0.1, 64/100 * 1.0 GPU-h/100-entries) = 0.64 h"</pre>
+  </div>
+</div>
+
+<h2>Run 1 — truck freight logistics (run_report.json summary)</h2>
+<pre>{
+  "run_id": "d741cef6-41a6-4073-a366-fd31c4c7aea0",
+  "topic": "truck freight logistics",
+  "counts": { "raw_text": 171, "raw_image": 61, "final_text": 157, "final_image": 36, "alpaca_records": 157 },
+  "savings": {
+    "data_reduction_pct": 16.81,
+    "duplicates_removed": 39,
+    "baseline_gpu_hours": 2.32,
+    "baseline_derivation": "max(0.1, 232/100 * 1.0 GPU-h/100-entries) = 2.32 h"
+  },
+  "text_dup_pairs": [
+    { "entry_a": { "title": "Rail freight transport", "id": "wiki:2234123" },
+      "entry_b": { "title": "Rail transport",         "id": "wiki:25715"   },
+      "similarity": 0.8633 }
+  ]
+}</pre>
+<p style="font-size:12px;color:#57606a;margin-top:4px">✓ Dup pair is two <em>different</em> Wikipedia articles (different IDs) — not sibling chunks. ✓ No intra-doc pairs.</p>
+
+<h2>Run 2 — honeybee pollination ecology (run_report.json summary)</h2>
+<pre>{
+  "run_id": "c8aac865-1656-4c4d-8728-9f9ab5b56974",
+  "topic": "honeybee pollination ecology",
+  "counts": { "raw_text": 24, "raw_image": 40, "final_text": 6, "final_image": 25, "alpaca_records": 6 },
+  "savings": {
+    "data_reduction_pct": 51.56,
+    "duplicates_removed": 33,
+    "baseline_gpu_hours": 0.64,
+    "baseline_derivation": "max(0.1, 64/100 * 1.0 GPU-h/100-entries) = 0.64 h"
+  },
+  "sample_images": [
+    { "title": "CSIRO ScienceImage 7018 Asian bee mites...", "source": "openverse" },
+    { "title": "CSIRO ScienceImage 6586 A frame from a beehive...", "source": "openverse" },
+    { "title": "Varroa destructor on honeybee host.jpg",   "source": "wikimedia" },
+    { "title": "Buzzing Across America: How Honey Bee Pollination Works", "source": "openverse" }
+  ]
+}</pre>
+
+<h2>Files Changed</h2>
+<table>
+  <tr><th>File</th><th>Change</th><th>Ch.</th></tr>
+  <tr><td>backend/agents/collector.py</td><td>Removed arXiv entirely. Wikipedia now uses REST /page/summary per-page. S2 called twice per query (<code>_make_s2_query_b</code>). Module-level <code>_HEADERS</code> with User-Agent on every request.</td><td>1</td></tr>
+  <tr><td>backend/agents/cleaner.py</td><td>Added post-clean invariant check: raises <code>RuntimeError</code> if any entry missing <code>parent_document_id</code>. Logs multiplication factor explicitly on every run.</td><td>2</td></tr>
+  <tr><td>backend/agents/quality_filter.py</td><td>Full rewrite: text uses YES/NO <code>_build_text_system_prompt</code> (not 1-10). Images: heuristic pre-filter + new Groq YES/NO title relevance check via <code>_build_image_system_prompt</code>.</td><td>3</td></tr>
+  <tr><td>backend/agents/structurer.py</td><td>No change needed — <code>baseline_derivation</code> already present from prior session.</td><td>4</td></tr>
+</table>
+
+<h2>One Known Issue</h2>
+<p style="font-size:13px;margin-top:4px">Semantic Scholar's free tier hit a 429 rate-limit on both test runs (daily quota). This is an external API constraint, not a code bug — the retry logic is correct and Wikipedia fills the gap. When the S2 quota resets the two-query strategy will produce the intended overlapping academic papers.</p>
+
+</div>
+<footer><p>Made with IBM Bob</p></footer>
+</body>
+</html>

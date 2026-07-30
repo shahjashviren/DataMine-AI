@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+requests
+groq
+python-dotenv
+sentence-transformers
+imagehash
+numpy
+Pillow
+python-multipart
+httpx
+sse-starlette
+duckduckgo-search
+scikit-learn

@@ -1,0 +1,22 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+# Defines the backend Web Service so Render can deploy it automatically.
+# Import this file in the Render dashboard: New + → Blueprint.
+
+services:
+  - type: web
+    name: datamine-ai-backend
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false          # Set manually in the Render dashboard
+      - key: OPENVERSE_CLIENT_ID
+        sync: false
+      - key: OPENVERSE_CLIENT_SECRET
+        sync: false
+      - key: OUTPUT_DIR
+        value: /tmp/outputs  # Render's filesystem is ephemeral; use /tmp
+    healthCheckPath: /health
+    autoDeploy: true
